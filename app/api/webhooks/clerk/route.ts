@@ -85,16 +85,22 @@ export async function POST(request: Request) {
     }
 
     try {
-      const result = await new Resend(apiKey).emails.send(
-        {
-          from,
-          to: recipient,
-          subject: subject ?? "CareBase account verification",
-          html: body ?? undefined,
-          text: text ?? undefined,
-        },
-        { idempotencyKey: `clerk-email/${event.data.id}` },
-      );
+      const resend = new Resend(apiKey);
+      const email = {
+        from,
+        to: recipient,
+        subject: subject ?? "CareBase account verification",
+      };
+      const requestOptions = { idempotencyKey: `clerk-email/${event.data.id}` };
+      const result = body
+        ? await resend.emails.send(
+            text ? { ...email, html: body, text } : { ...email, html: body },
+            requestOptions,
+          )
+        : await resend.emails.send(
+            { ...email, text: text as string },
+            requestOptions,
+          );
       if (result.error) {
         console.error("Clerk email delivery failed:", result.error.message);
         return Response.json({ error: "Email delivery failed." }, { status: 502 });
