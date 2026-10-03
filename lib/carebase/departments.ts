@@ -1,5 +1,7 @@
 import "server-only";
 
+import db from "@/lib/db";
+import { recordCarebaseAudit } from "./audit";
 import type { CarebaseContext } from "./context";
 
 /**
@@ -39,72 +41,54 @@ export function departmentScope(
   return { departmentId: { in: ids } };
 }
 
-/**
- * Standard hospital departments offered when creating a department.
- * A custom name can always be typed instead (§1 Department Management).
- */
-export const DEPARTMENT_PRESETS: string[] = [
-  "Emergency / Casualty",
-  "Outpatient Department (OPD)",
-  "Inpatient / Wards",
-  "Pediatrics",
-  "Obstetrics & Gynecology",
-  "General Medicine",
-  "General Surgery",
-  "Orthopedics",
-  "Cardiology",
-  "Neurology",
-  "Psychiatry / Mental Health",
-  "Dental",
-  "Ophthalmology",
-  "ENT",
-  "Dermatology",
-  "Urology",
-  "Nephrology",
-  "Oncology",
-  "Radiology / Imaging",
-  "Laboratory",
-  "Pharmacy",
-  "Physiotherapy",
-  "Nutrition & Dietetics",
-  "ICU / Critical Care",
-  "Operating Theatre",
-  "Maternity",
-  "Blood Bank",
-  "Mortuary",
-  "Administration",
-  "Medical Records",
-  "Nursing",
-  "Ambulance / Emergency Transport",
-];
-
-/** Diagnostic departments / modalities offered when creating a service. */
-export const DIAGNOSTIC_DEPARTMENT_PRESETS: string[] = [
-  "Laboratory",
-  "Radiology / Imaging",
-  "Ultrasound",
-  "X-Ray",
-  "CT Scan",
-  "MRI",
-  "ECG / Cardiology",
-];
+export {
+  DEPARTMENT_PRESETS,
+  DIAGNOSTIC_DEPARTMENT_PRESETS,
+  DIAGNOSTIC_SERVICE_PRESETS,
+} from "./presets";
 
 /**
- * Standard test & scan services offered when creating a diagnostic service.
- * `kind` mirrors the `DiagnosticKind` enum.
+ * Resolves a department from either an existing id or a typed name.
+ *
+ * Used by the tests & scans and attendance forms so staff can pick a known
+ * department or type a new one. A typed name is created inside the caller's
+ * hospital when it does not exist yet (and audited). Returns `null` when
+ * neither was supplied.
  */
-export const DIAGNOSTIC_SERVICE_PRESETS: { name: string; kind: "TEST" | "SCAN" }[] = [
-  { name: "Complete Blood Count (CBC)", kind: "TEST" },
-  { name: "Blood Glucose", kind: "TEST" },
-  { name: "Urinalysis", kind: "TEST" },
-  { name: "Malaria RDT", kind: "TEST" },
-  { name: "Culture & Sensitivity", kind: "TEST" },
-  { name: "Lipid Profile", kind: "TEST" },
-  { name: "Liver Function Test", kind: "TEST" },
-  { name: "Kidney Function Test", kind: "TEST" },
-  { name: "X-Ray", kind: "SCAN" },
-  { name: "Ultrasound", kind: "SCAN" },
-  { name: "CT Scan", kind: "SCAN" },
-  { name: "MRI", kind: "SCAN" },
-  { name: "ECG", kind: "SCAN" },
-];
+export async function resolveDepartmentId(
+  context: CarebaseContext,
+  departmentId: string | null | undefined,
+  departmentName: string | null | undefined
+): Promise<string | null> {
+  const name = (departmentName ?? "").trim();
+
+  if (departmentId) {
+    const department = await db.department.findFirst({
+      where: { id: departmentId, hospitalId: context.hospital.id },
+      select: { id: true },
+    });
+    if (!department) throw new Error("Choose a department from this hospital.");
+    return department.id;
+  }
+
+  if (!name) return null;
+  if (name.length < 2) throw new Error("Enter a valid department name.");
+
+  const existing = await db.department.findFirst({
+    where: { hospitalId: context.hospital.id, name: { equals: name, mode: "insensitive" } },
+    select: { id: true },
+  });
+  if (existing) return existing.id;
+
+  const department = await db.department.create({
+    data: { hospitalId: context.hospital.id, name },
+  });
+  await recordCarebaseAudit(
+    context,
+    "department.created",
+    "Department",
+    department.id,
+    { name, source: "form" }
+  );
+  return department.id;
+}

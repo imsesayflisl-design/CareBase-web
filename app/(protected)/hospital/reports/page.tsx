@@ -3,6 +3,7 @@ import db from "@/lib/db";
 import { PageHeader } from "@/components/carebase/page-header";
 import { Panel } from "@/components/carebase/panel";
 import { StatusBadge } from "@/components/carebase/status-badge";
+import { ExportMenu } from "@/components/carebase/export-button";
 import { format, startOfMonth, endOfDay } from "date-fns";
 import { BarChart3, BedDouble, CalendarDays, CreditCard, Download, FlaskConical, Users } from "lucide-react";
 import Link from "next/link";
@@ -33,7 +34,12 @@ export default async function ReportsPage({
 
   return (
     <div>
-      <PageHeader title="Reports & analytics" description="Operational summaries for your hospital. Exports follow the same hospital and permission boundaries as the workspace." action={<form action="/hospital/reports" className="flex items-center gap-2"><input type="date" name="from" defaultValue={from || format(start, "yyyy-MM-dd")} className="h-9 rounded-lg border border-slate-200 bg-white px-2 text-xs" /><span className="text-xs text-slate-400">to</span><input type="date" name="to" defaultValue={to || format(end, "yyyy-MM-dd")} className="h-9 rounded-lg border border-slate-200 bg-white px-2 text-xs" /><button className="h-9 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white">Apply</button></form>} />
+      <PageHeader title="Reports & analytics" description="Operational summaries for your hospital. Exports follow the same hospital and permission boundaries as the workspace." action={
+          <div className="flex flex-wrap items-center gap-3">
+            <form action="/hospital/reports" className="flex items-center gap-2"><input type="date" name="from" defaultValue={from || format(start, "yyyy-MM-dd")} className="h-9 rounded-lg border border-slate-200 bg-white px-2 text-xs" /><span className="text-xs text-slate-400">to</span><input type="date" name="to" defaultValue={to || format(end, "yyyy-MM-dd")} className="h-9 rounded-lg border border-slate-200 bg-white px-2 text-xs" /><button className="h-9 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white">Apply</button></form>
+            <ExportMenu dataset="hospital" label="Export hospital records" />
+          </div>
+        } />
       <div className="mb-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="New patients" value={patients} note={format(start, "MMM d") + " – " + format(end, "MMM d")} icon={Users} />
         <Metric label="Appointments" value={appointmentTotal} note="Visits scheduled in this period" icon={CalendarDays} />

@@ -3,6 +3,7 @@ import { canAccess, requireCarebasePermission } from "@/lib/carebase/context";
 import db from "@/lib/db";
 import { PageHeader } from "@/components/carebase/page-header";
 import { Panel, Field, FormSubmit, SelectField } from "@/components/carebase/panel";
+import { ExportMenu } from "@/components/carebase/export-button";
 import { Button } from "@/components/ui/button";
 import { format } from "date-fns";
 import { Search, UserPlus, Users } from "lucide-react";
@@ -17,6 +18,11 @@ export default async function PatientsPage({
   const canCreate = await canAccess("patients.manage");
   const { q = "" } = await searchParams;
   const search = q.trim();
+  const departments = await db.department.findMany({
+    where: { hospitalId: context.hospital.id, status: "ACTIVE" },
+    orderBy: { name: "asc" },
+    select: { id: true, name: true },
+  });
   const where = {
     hospitalId: context.hospital.id,
     ...(search
@@ -48,7 +54,12 @@ export default async function PatientsPage({
       <PageHeader
         title="Patients"
         description="Register patients, find existing records and follow their visits across your hospital."
-        action={canCreate ? <a href="#register-patient" className="inline-flex h-10 items-center gap-2 rounded-lg bg-cyan-700 px-4 text-xs font-semibold text-white hover:bg-cyan-800"><UserPlus className="size-4" /> Register patient</a> : undefined}
+        action={
+          <div className="flex items-center gap-3">
+            <ExportMenu dataset="patients" departments={departments} />
+            {canCreate && <a href="#register-patient" className="inline-flex h-10 items-center gap-2 rounded-lg bg-cyan-700 px-4 text-xs font-semibold text-white hover:bg-cyan-800"><UserPlus className="size-4" /> Register patient</a>}
+          </div>
+        }
       />
       <div className="mb-5 grid gap-4 sm:grid-cols-3">
         <MiniMetric label="Patient records" value={total.toLocaleString()} icon={Users} />

@@ -3,6 +3,7 @@ import { canAccess, requireCarebasePermission } from "@/lib/carebase/context";
 import db from "@/lib/db";
 import { PageHeader } from "@/components/carebase/page-header";
 import { EmptyState, Field, FormSubmit, Panel, SelectField } from "@/components/carebase/panel";
+import { ExportMenu } from "@/components/carebase/export-button";
 import { StatusBadge } from "@/components/carebase/status-badge";
 import { format } from "date-fns";
 import { BriefcaseMedical, MailPlus, ShieldCheck, Users } from "lucide-react";
@@ -42,7 +43,12 @@ export default async function StaffPage() {
 
   return (
     <div>
-      <PageHeader title="Staff & access" description="Invite colleagues, assign roles and connect nurses with the doctors they support." action={<div className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-cyan-700" /> Role-based access</div>} />
+      <PageHeader title="Staff & access" description="Invite colleagues, assign roles and connect nurses with the doctors they support." action={
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 text-xs text-slate-500"><ShieldCheck className="size-4 text-cyan-700" /> Role-based access</div>
+            <ExportMenu dataset="staff" departments={departments} />
+          </div>
+        } />
       <div className="mb-5 grid gap-4 sm:grid-cols-3">
         <Metric label="Team members" value={members.length} icon={Users} />
         <Metric label="Active members" value={activeCount} icon={BriefcaseMedical} />

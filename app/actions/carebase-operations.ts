@@ -9,6 +9,7 @@ import {
   recordCarebaseAudit,
 } from "@/lib/carebase/audit";
 import { requireCarebasePermission } from "@/lib/carebase/context";
+import { resolveDepartmentId } from "@/lib/carebase/departments";
 
 const field = (data: FormData, name: string) => String(data.get(name) ?? "").trim();
 
@@ -184,18 +185,16 @@ export async function createDiagnosticService(formData: FormData) {
   const context = await requireCarebasePermission("diagnostics.manage");
   const kind = field(formData, "kind");
   const name = field(formData, "name");
-  const departmentId = field(formData, "departmentId") || null;
   const price = Number(field(formData, "price")) || 0;
   if (!["TEST", "SCAN"].includes(kind)) throw new Error("Choose test or scan.");
   if (name.length < 2) throw new Error("Enter the service name.");
   if (price < 0) throw new Error("Price cannot be negative.");
-  if (departmentId) {
-    const department = await db.department.findFirst({
-      where: { id: departmentId, hospitalId: context.hospital.id },
-      select: { id: true },
-    });
-    if (!department) throw new Error("Choose a department from this hospital.");
-  }
+  // Select an existing department or type a new one.
+  const departmentId = await resolveDepartmentId(
+    context,
+    field(formData, "departmentId"),
+    field(formData, "departmentName")
+  );
   const service = await db.diagnosticService.create({
     data: {
       hospitalId: context.hospital.id,
@@ -311,7 +310,7 @@ export async function saveAttendance(formData: FormData) {
   if (!dateValue || !["MORNING", "EVENING"].includes(shift)) {
     throw new Error("Choose a date and shift.");
   }
-  if (!["PRESENT", "ABSENT", "LEAVE"].includes(status)) throw new Error("Choose a valid attendance status.");
+  if (!["PRESENT", "ABSENT", "LATE", "LEAVE"].includes(status)) throw new Error("Choose a valid attendance status.");
   const member = await db.hospitalMember.findFirst({
     where: { id: memberId, hospitalId: context.hospital.id, status: "ACTIVE" },
     select: { id: true },
@@ -319,6 +318,12 @@ export async function saveAttendance(formData: FormData) {
   if (!member) throw new Error("Choose a staff member from this hospital.");
   const date = new Date(dateValue + "T00:00:00.000Z");
   if (Number.isNaN(date.getTime())) throw new Error("Choose a valid attendance date.");
+  // Select the department or type a new one to attach to this attendance entry.
+  const departmentId = await resolveDepartmentId(
+    context,
+    field(formData, "departmentId"),
+    field(formData, "departmentName")
+  );
   const checkInValue = field(formData, "checkIn");
   const checkOutValue = field(formData, "checkOut");
   const record = await db.staffAttendance.upsert({
@@ -326,23 +331,32 @@ export async function saveAttendance(formData: FormData) {
     create: {
       hospitalId: context.hospital.id,
       memberId,
+      departmentId,
       date,
       shift: shift as "MORNING" | "EVENING",
-      status: status as "PRESENT" | "ABSENT" | "LEAVE",
+      status: status as "PRESENT" | "ABSENT" | "LATE" | "LEAVE",
       checkInAt: checkInValue ? new Date(dateValue + "T" + checkInValue + ":00") : null,
       checkOutAt: checkOutValue ? new Date(dateValue + "T" + checkOutValue + ":00") : null,
       location: field(formData, "location") || null,
       notes: field(formData, "notes") || null,
+      createdByMemberId: context.membership.id,
+      updatedByMemberId: context.membership.id,
     },
     update: {
-      status: status as "PRESENT" | "ABSENT" | "LEAVE",
+      departmentId,
+      status: status as "PRESENT" | "ABSENT" | "LATE" | "LEAVE",
       checkInAt: checkInValue ? new Date(dateValue + "T" + checkInValue + ":00") : null,
       checkOutAt: checkOutValue ? new Date(dateValue + "T" + checkOutValue + ":00") : null,
       location: field(formData, "location") || null,
       notes: field(formData, "notes") || null,
+      updatedByMemberId: context.membership.id,
     },
   });
-  await recordCarebaseAudit(context, "attendance.saved", "StaffAttendance", record.id, { memberId, status });
+  await recordCarebaseAudit(context, "attendance.saved", "StaffAttendance", record.id, {
+    memberId,
+    status,
+    departmentId,
+  });
   revalidatePath("/hospital/attendance");
   revalidatePath("/hospital/reports");
 }
