@@ -1,4 +1,4 @@
-import { createDepartment, setDepartmentStatus } from "@/app/actions/carebase-admin";
+import { createDepartment, deleteDepartment, setDepartmentStatus } from "@/app/actions/carebase-admin";
 import { canAccess, requireCarebasePermission } from "@/lib/carebase/context";
 import db from "@/lib/db";
 import { PageHeader } from "@/components/carebase/page-header";
@@ -65,6 +65,7 @@ export default async function DepartmentsPage() {
               <div className="mt-4 flex gap-4 border-t border-slate-100 pt-4 text-[11px] text-slate-500"><span><strong className="text-slate-800">{department._count.members}</strong> staff</span><span><strong className="text-slate-800">{department._count.doctors}</strong> doctors</span><span><strong className="text-slate-800">{department._count.appointments}</strong> visits</span></div>
               {department.doctors.length > 0 && <p className="mt-3 truncate text-[11px] text-slate-500">Doctors: {department.doctors.map((doctor) => doctor.member.fullName).join(", ")}</p>}
               {canManage && <form action={setDepartmentStatus} className="mt-4 border-t border-slate-100 pt-3"><input type="hidden" name="id" value={department.id} /><input type="hidden" name="status" value={department.status === "ACTIVE" ? "INACTIVE" : "ACTIVE"} /><button className="text-[11px] font-semibold text-cyan-700 hover:text-cyan-900">{department.status === "ACTIVE" ? "Deactivate department" : "Reactivate department"}</button></form>}
+              {canManage && <details className="mt-3 border-t border-slate-100 pt-3"><summary className="cursor-pointer text-[11px] font-semibold text-red-700">Delete department</summary><p className="mt-2 text-[11px] leading-4 text-slate-500">This permanently removes the department and its staff assignments. Historical records will remain.</p><form action={deleteDepartment} className="mt-2"><input type="hidden" name="id" value={department.id} /><button className="text-[11px] font-semibold text-red-700 hover:text-red-900">Confirm permanent deletion</button></form></details>}
               <Link href={"/hospital/departments/" + department.id} className="mt-3 inline-flex items-center gap-1 text-[11px] font-semibold text-cyan-700 hover:text-cyan-900">Open department dashboard →</Link>
             </article>
           ))}

@@ -41,6 +41,25 @@ export async function setDepartmentStatus(formData: FormData) {
   revalidatePath("/hospital/departments");
 }
 
+export async function deleteDepartment(formData: FormData) {
+  const context = await requireCarebasePermission("departments.manage");
+  const id = String(formData.get("id") ?? "");
+  const department = await db.department.findFirst({
+    where: { id, hospitalId: context.hospital.id },
+    select: { id: true, name: true },
+  });
+  if (!department) throw new Error("Department not found.");
+
+  const deleted = await db.department.deleteMany({
+    where: { id: department.id, hospitalId: context.hospital.id },
+  });
+  if (!deleted.count) throw new Error("Department not found.");
+  await recordCarebaseAudit(context, "department.deleted", "Department", department.id, {
+    name: department.name,
+  });
+  revalidatePath("/hospital", "layout");
+}
+
 export async function inviteHospitalMember(formData: FormData) {
   const context = await requireCarebasePermission("staff.manage");
   const email = String(formData.get("email") ?? "").trim().toLowerCase();

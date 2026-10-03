@@ -23,9 +23,9 @@ RESEND_TEST_TO=your-test-address@example.com
 
 ## Clerk webhook
 
-Create a Clerk webhook endpoint at `https://<your-domain>/api/webhooks/clerk`, subscribe it to `sms.created` and `user.created`, and set its signing secret as `CLERK_WEBHOOK_SIGNING_SECRET`. For local testing, expose the development server through a secure tunnel and use that public URL.
+Create a Clerk webhook endpoint at `https://<your-domain>/api/webhooks/clerk`, subscribe it to `sms.created`, `email.created` and `user.created`, and set its signing secret as `CLERK_WEBHOOK_SIGNING_SECRET`. For local testing, expose the development server through a secure tunnel and use that public URL.
 
-In Clerk Dashboard, open the SMS verification template and turn **Delivered by Clerk** off. This is per template; only disable it after the webhook is deployed and tested, or users will not receive verification codes. Keep Clerk's phone-code verification enabled so Clerk still validates the code.
+For email-code sign-in, open the email verification-code template in Clerk Dashboard and turn **Delivered by Clerk** off. The signed `email.created` webhook forwards Clerk's generated code email through Resend; Clerk still generates and validates the code. For staff invitations, keep `notify: true` on the Clerk invitation API call and configure its email template for webhook delivery if Resend should send it. The webhook skips emails marked as delivered by Clerk to avoid duplicates. Keep Clerk's phone-code verification enabled and configure the SMS template as described below.
 
 ## Provider setup
 

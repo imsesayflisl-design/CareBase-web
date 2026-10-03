@@ -1,8 +1,8 @@
-import type { SMSWebhookEvent, UserWebhookEvent } from "@clerk/nextjs/server";
+import type { EmailWebhookEvent, SMSWebhookEvent, UserWebhookEvent } from "@clerk/nextjs/server";
 import { Resend } from "resend";
 import { Webhook } from "svix";
 
-type ClerkWebhookEvent = SMSWebhookEvent | UserWebhookEvent;
+type ClerkWebhookEvent = EmailWebhookEvent | SMSWebhookEvent | UserWebhookEvent;
 
 export async function POST(request: Request) {
   const signingSecret = process.env.CLERK_WEBHOOK_SIGNING_SECRET;
@@ -66,6 +66,42 @@ export async function POST(request: Request) {
     if (!response.ok || ![100, 101, 102].includes(statusCode ?? 0)) {
       console.error("Africa's Talking SMS request failed:", response.status);
       return Response.json({ error: "SMS delivery failed." }, { status: 502 });
+    }
+
+    return Response.json({ received: true });
+  }
+
+  if (event.type === "email.created") {
+    const { delivered_by_clerk: deliveredByClerk, to_email_address: recipient, subject, body, body_plain: text } = event.data;
+    if (deliveredByClerk) return Response.json({ received: true, deliverySkipped: true });
+    if (!recipient || (!body && !text)) {
+      return Response.json({ error: "Email recipient or content is missing." }, { status: 400 });
+    }
+
+    const apiKey = process.env.RESEND_API_KEY;
+    const from = process.env.RESEND_FROM_EMAIL;
+    if (!apiKey || !from) {
+      return Response.json({ error: "Email delivery is not configured." }, { status: 500 });
+    }
+
+    try {
+      const result = await new Resend(apiKey).emails.send(
+        {
+          from,
+          to: recipient,
+          subject: subject ?? "CareBase account verification",
+          html: body ?? undefined,
+          text: text ?? undefined,
+        },
+        { idempotencyKey: `clerk-email/${event.data.id}` },
+      );
+      if (result.error) {
+        console.error("Clerk email delivery failed:", result.error.message);
+        return Response.json({ error: "Email delivery failed." }, { status: 502 });
+      }
+    } catch (error) {
+      console.error("Clerk email request failed:", error instanceof Error ? error.message : "Unknown error");
+      return Response.json({ error: "Email delivery failed." }, { status: 502 });
     }
 
     return Response.json({ received: true });
