@@ -73,7 +73,10 @@ export async function POST(request: Request) {
 
   if (event.type === "email.created") {
     const { delivered_by_clerk: deliveredByClerk, to_email_address: recipient, subject, body, body_plain: text } = event.data;
-    if (deliveredByClerk) return Response.json({ received: true, deliverySkipped: true });
+    if (deliveredByClerk) {
+      console.log("email.created skipped: delivered by Clerk:", subject);
+      return Response.json({ received: true, deliverySkipped: true });
+    }
     if (!recipient || (!body && !text)) {
       return Response.json({ error: "Email recipient or content is missing." }, { status: 400 });
     }
