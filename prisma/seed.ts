@@ -1,7 +1,6 @@
-import { generateRandomColor } from "@/utils";
-
-const { PrismaClient } = require("@prisma/client");
-const { fakerDE: faker } = require("@faker-js/faker");
+import { PrismaClient } from "@prisma/client";
+import { fakerDE as faker } from "@faker-js/faker";
+import { generateRandomColor } from "../utils/index.ts";
 
 const prisma = new PrismaClient();
 
@@ -9,7 +8,7 @@ async function seed() {
   console.log("Seeding data...");
 
   // Create 3 staff
-  const staffRoles = ["NURSE", "CASHIER", "LAB_TECHNICIAN"];
+  const staffRoles = ["NURSE", "CASHIER", "LAB_TECHNICIAN"] as const;
   for (const role of staffRoles) {
     const mobile = faker.phone.number();
 

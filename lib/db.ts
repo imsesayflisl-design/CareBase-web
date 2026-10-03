@@ -1,7 +1,22 @@
 import { PrismaClient } from "@prisma/client";
 
+function datasourceUrl() {
+  const databaseUrl = process.env.DATABASE_URL;
+
+  if (!databaseUrl) return undefined;
+
+  // Prisma 6.0.x cannot establish a connection when Neon URIs include
+  // `channel_binding=require`, even though the URI works for the Prisma CLI.
+  // TLS remains required through `sslmode=require`.
+  return databaseUrl
+    .replace(/([?&])channel_binding=[^&]*&?/, "$1")
+    .replace(/[?&]$/, "");
+}
+
 const prismaClientSingleton = () => {
-  return new PrismaClient();
+  const url = datasourceUrl();
+
+  return new PrismaClient(url ? { datasources: { db: { url } } } : undefined);
 };
 
 declare const globalThis: {

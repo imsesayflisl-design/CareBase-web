@@ -3,6 +3,30 @@ type RouteAccessProps = {
 };
 
 export const routeAccess: RouteAccessProps = {
+  "/hospital(.*)": [
+    "admin",
+    "doctor",
+    "nurse",
+    "lab_technician",
+    "cashier",
+    "patient",
+    "receptionist",
+    "accountant",
+    "staff",
+    "owner",
+  ],
+  "/setup(.*)": [
+    "admin",
+    "doctor",
+    "nurse",
+    "lab_technician",
+    "cashier",
+    "patient",
+    "receptionist",
+    "accountant",
+    "staff",
+    "owner",
+  ],
   "/admin(.*)": ["admin"],
   "/patient(.*)": ["patient", "admin", "doctor", "nurse"],
   "/doctor(.*)": ["doctor"],
