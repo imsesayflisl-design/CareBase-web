@@ -8,9 +8,16 @@ function datasourceUrl() {
   // Prisma 6.0.x cannot establish a connection when Neon URIs include
   // `channel_binding=require`, even though the URI works for the Prisma CLI.
   // TLS remains required through `sslmode=require`.
-  return databaseUrl
+  const url = databaseUrl
     .replace(/([?&])channel_binding=[^&]*&?/, "$1")
     .replace(/[?&]$/, "");
+
+  // Neon suspends the compute endpoint when idle and waking it can take
+  // longer than Prisma's default 5s connect timeout, which surfaces as a
+  // P1001 "Can't reach database server" error on the first request after
+  // idle. Give the handshake enough time to complete the cold start.
+  if (/[?&]connect_timeout=/.test(url)) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}connect_timeout=15`;
 }
 
 const prismaClientSingleton = () => {
