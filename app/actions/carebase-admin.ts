@@ -6,6 +6,7 @@ import { createHash, randomBytes } from "crypto";
 import { clerkClient } from "@clerk/nextjs/server";
 import db from "@/lib/db";
 import { recordCarebaseAudit } from "@/lib/carebase/audit";
+import { sendStaffInvitationEmail } from "@/lib/carebase/invitation-email";
 import { requireCarebasePermission } from "@/lib/carebase/context";
 import { CAREBASE_PERMISSIONS } from "@/lib/carebase/permissions";
 
@@ -100,14 +101,42 @@ export async function inviteHospitalMember(formData: FormData) {
   });
 
   const requestHeaders = await headers();
-  const origin = requestHeaders.get("origin") ?? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+  const origin =
+    requestHeaders.get("origin") ??
+    (process.env.NEXT_PUBLIC_APP_URL
+      ? "https://" + process.env.NEXT_PUBLIC_APP_URL.replace(/^https?:\/\//, "")
+      : null) ??
+    (process.env.VERCEL_URL ? "https://" + process.env.VERCEL_URL : null) ??
+    "http://localhost:3000";
+  const acceptUrl = origin + "/invitation/accept?token=" + token;
+
+  // Resend is the sender. Send the invite email through Resend FIRST — if it
+  // fails, abort so the owner sees the real error instead of a silent invite.
+  const emailResult = await sendStaffInvitationEmail({
+    to: email,
+    fullName,
+    hospitalName: context.hospital.name,
+    roleName: role.name,
+    departmentName: department?.name ?? null,
+    acceptUrl,
+    expiresAt: invitation.expiresAt,
+  });
+  if (!emailResult.sent) {
+    await db.staffInvitation.delete({ where: { id: invitation.id } });
+    throw new Error(emailResult.error ?? "The invitation email could not be delivered.");
+  }
+
+  // Register the invite with Clerk WITHOUT notifying (notify: false) so only
+  // Resend sends the email — no duplicates. If Clerk registration fails, keep
+  // our invitation (the Resend link still works) and log it.
+  let clerkFailed: string | null = null;
   try {
     const client = await clerkClient();
     const clerkInvitation = await client.invitations.createInvitation({
       emailAddress: email,
-      redirectUrl: origin + "/invitation/accept?token=" + token,
+      redirectUrl: acceptUrl,
       publicMetadata: { carebaseInvitationId: invitation.id },
-      notify: true,
+      notify: false,
       ignoreExisting: true,
     });
     await db.staffInvitation.update({
@@ -115,13 +144,16 @@ export async function inviteHospitalMember(formData: FormData) {
       data: { clerkInvitationId: clerkInvitation.id },
     });
   } catch (error) {
-    await db.staffInvitation.delete({ where: { id: invitation.id } });
-    throw error;
+    clerkFailed = error instanceof Error ? error.message : "Clerk invitation failed.";
+    console.error("Clerk invitation registration failed (Resend email already sent):", clerkFailed);
   }
 
   await recordCarebaseAudit(context, "staff.invited", "StaffInvitation", invitation.id, {
     email,
     role: role.name,
+    resendSent: true,
+    clerkRegistered: !clerkFailed,
+    ...(clerkFailed ? { clerkError: clerkFailed } : {}),
   });
   revalidatePath("/hospital/staff");
 }
@@ -143,6 +175,45 @@ export async function revokeHospitalInvitation(formData: FormData) {
     data: { status: "REVOKED" },
   });
   await recordCarebaseAudit(context, "staff.invitation_revoked", "StaffInvitation", id, {
+    email: invitation.email,
+  });
+  revalidatePath("/hospital/staff");
+}
+
+/** Re-sends the invitation email through Resend (owner can retry from the staff page). */
+export async function resendHospitalInvitation(formData: FormData) {
+  const context = await requireCarebasePermission("staff.manage");
+  const id = String(formData.get("id") ?? "");
+  const invitation = await db.staffInvitation.findFirst({
+    where: { id, hospitalId: context.hospital.id, status: "PENDING", expiresAt: { gt: new Date() } },
+    include: { role: true, department: true },
+  });
+  if (!invitation) throw new Error("Invitation not found or expired.");
+
+  const requestHeaders = await headers();
+  const origin =
+    requestHeaders.get("origin") ??
+    (process.env.NEXT_PUBLIC_APP_URL
+      ? "https://" + process.env.NEXT_PUBLIC_APP_URL.replace(/^https?:\/\//, "")
+      : null) ??
+    (process.env.VERCEL_URL ? "https://" + process.env.VERCEL_URL : null) ??
+    "http://localhost:3000";
+  // NOTE: the token itself is not stored — only its hash — so a resend
+  // delivers a fresh Resend email pointing at /invitation/accept (the invitee
+  // signs in with the invited email, then accepts). If they lost the original
+  // token link, revoke + re-invite to mint a new one.
+  const result = await sendStaffInvitationEmail({
+    to: invitation.email,
+    fullName: invitation.fullName,
+    hospitalName: context.hospital.name,
+    roleName: invitation.role.name,
+    departmentName: invitation.department?.name ?? null,
+    acceptUrl: origin + "/invitation/accept",
+    expiresAt: invitation.expiresAt,
+  });
+  if (!result.sent) throw new Error(result.error ?? "The invitation email could not be delivered.");
+
+  await recordCarebaseAudit(context, "staff.invitation_resent", "StaffInvitation", id, {
     email: invitation.email,
   });
   revalidatePath("/hospital/staff");

@@ -30,6 +30,22 @@ export async function acceptCarebaseInvitation(token: string) {
   const existing = await db.hospitalMember.findFirst({
     where: { hospitalId: invitation.hospitalId, userId },
   });
+
+  // One email = one workspace. An owner email already tied to another
+  // hospital cannot accept an invitation into a second workspace.
+  const elsewhere = await db.hospitalMember.findFirst({
+    where: {
+      OR: [
+        { userId, NOT: { hospitalId: invitation.hospitalId } },
+        {
+          email: { equals: email, mode: "insensitive" },
+          NOT: { hospitalId: invitation.hospitalId },
+        },
+      ],
+    },
+    select: { id: true, hospitalId: true },
+  });
+  if (elsewhere) redirect("/hospital");
   if (!existing) {
     const fullName =
       [user?.firstName, user?.lastName].filter(Boolean).join(" ") ||

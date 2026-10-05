@@ -450,6 +450,8 @@ model Hospital {
   updatedAt         DateTime @updatedAt
 
   @@index([status])
+  @@index([createdByUserId])
+  @@index([email])
 }
 
 model HospitalRole {
@@ -503,6 +505,7 @@ model HospitalMember {
   @@unique([hospitalId, userId])
   @@index([hospitalId, status])
   @@index([hospitalId, roleId])
+  @@index([userId, status])
 }
 
 model Department {

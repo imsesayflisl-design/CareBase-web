@@ -1,6 +1,7 @@
 import { createCarebaseHospital } from "@/app/actions/carebase-setup";
 import { Button } from "@/components/ui/button";
 import { auth, currentUser } from "@clerk/nextjs/server";
+import db from "@/lib/db";
 import { Building2, MapPin, ShieldCheck } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
@@ -11,6 +12,38 @@ export default async function SetupPage() {
   if (!userId) redirect("/sign-in");
   const user = await currentUser();
   const email = user?.primaryEmailAddress?.emailAddress ?? user?.emailAddresses[0]?.emailAddress ?? "";
+
+  // One email = one hospital workspace. If this user (or this owner email)
+  // already owns / belongs to a workspace, send them back instead of
+  // showing the create form again.
+  if (email) {
+    const alreadyProvisioned = await db.hospitalMember.findFirst({
+      where: {
+        OR: [
+          { userId },
+          { email: { equals: email.trim().toLowerCase(), mode: "insensitive" } },
+        ],
+      },
+      select: { id: true },
+    });
+    if (alreadyProvisioned) redirect("/hospital");
+    const hospitalOwned = await db.hospital.findFirst({
+      where: {
+        OR: [
+          { createdByUserId: userId },
+          { email: { equals: email.trim().toLowerCase(), mode: "insensitive" } },
+        ],
+      },
+      select: { id: true },
+    });
+    if (hospitalOwned) redirect("/hospital");
+  } else {
+    const alreadyProvisioned = await db.hospitalMember.findFirst({
+      where: { userId, status: "ACTIVE" },
+      select: { id: true },
+    });
+    if (alreadyProvisioned) redirect("/hospital");
+  }
 
   return (
     <main className="min-h-screen bg-[#f6f8fb]">

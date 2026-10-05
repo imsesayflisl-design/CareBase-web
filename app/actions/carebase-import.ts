@@ -10,6 +10,7 @@ import {
   publishCarebaseEvent,
   recordCarebaseAudit,
 } from "@/lib/carebase/audit";
+import { sendStaffInvitationEmail } from "@/lib/carebase/invitation-email";
 import { requireCarebasePermission } from "@/lib/carebase/context";
 import {
   mapStaffImportFile,
@@ -163,7 +164,10 @@ export async function confirmStaffImport(
   const requestHeaders = await headers();
   const origin =
     requestHeaders.get("origin") ??
-    process.env.NEXT_PUBLIC_APP_URL ??
+    (process.env.NEXT_PUBLIC_APP_URL
+      ? "https://" + process.env.NEXT_PUBLIC_APP_URL.replace(/^https?:\/\//, "")
+      : null) ??
+    (process.env.VERCEL_URL ? "https://" + process.env.VERCEL_URL : null) ??
     "http://localhost:3000";
   const client = await clerkClient();
 
@@ -199,17 +203,43 @@ export async function confirmStaffImport(
       });
       invitationId = invitation.id;
 
-      const clerkInvitation = await client.invitations.createInvitation({
-        emailAddress: row.email,
-        redirectUrl: origin + "/invitation/accept?token=" + token,
-        publicMetadata: { carebaseInvitationId: invitation.id },
-        notify: true,
-        ignoreExisting: true,
+      const acceptUrl = origin + "/invitation/accept?token=" + token;
+      const roleName = importContext.roles.find((item) => item.id === row.roleId)?.name ?? "Staff";
+      const departmentName = row.departmentId
+        ? importContext.departments.find((item) => item.id === row.departmentId)?.name ?? null
+        : null;
+
+      // Resend is the sender — send first. If Resend fails, the row fails
+      // loudly so the owner knows the email never went out.
+      const emailResult = await sendStaffInvitationEmail({
+        to: row.email,
+        fullName: row.fullName,
+        hospitalName: context.hospital.name,
+        roleName,
+        departmentName,
+        acceptUrl,
+        expiresAt: invitation.expiresAt,
       });
-      await db.staffInvitation.update({
-        where: { id: invitation.id },
-        data: { clerkInvitationId: clerkInvitation.id },
-      });
+      if (!emailResult.sent) {
+        throw new Error(emailResult.error ?? "Invitation email could not be delivered.");
+      }
+
+      // Register with Clerk silently (notify: false) so Resend is the only sender.
+      try {
+        const clerkInvitation = await client.invitations.createInvitation({
+          emailAddress: row.email,
+          redirectUrl: acceptUrl,
+          publicMetadata: { carebaseInvitationId: invitation.id },
+          notify: false,
+          ignoreExisting: true,
+        });
+        await db.staffInvitation.update({
+          where: { id: invitation.id },
+          data: { clerkInvitationId: clerkInvitation.id },
+        });
+      } catch (error) {
+        console.error("Clerk bulk invitation registration failed (Resend email already sent):", error instanceof Error ? error.message : "unknown");
+      }
 
       imported += 1;
       existingEmails.add(row.email);
