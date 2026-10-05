@@ -1,9 +1,16 @@
 "use client";
 
 import { UserButton } from "@clerk/nextjs";
-import { Bell, Search } from "lucide-react";
+import { Bell, Download, Search } from "lucide-react";
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { DepartmentSwitcher } from "./department-switcher";
+
+interface BeforeInstallPromptEvent extends Event {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+}
 
 export function CarebaseHeader({
   hospitalName,
@@ -22,6 +29,50 @@ export function CarebaseHeader({
   unreadCount: number;
   permissions: string[];
 }) {
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [isInstalled, setIsInstalled] = useState(false);
+
+  useEffect(() => {
+    const standaloneQuery = window.matchMedia("(display-mode: standalone)");
+    const updateInstalledState = () => {
+      setIsInstalled(
+        standaloneQuery.matches ||
+          Boolean((navigator as Navigator & { standalone?: boolean }).standalone),
+      );
+    };
+    const handleInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as BeforeInstallPromptEvent);
+    };
+    const handleAppInstalled = () => {
+      setIsInstalled(true);
+      setInstallPrompt(null);
+    };
+
+    updateInstalledState();
+    window.addEventListener("beforeinstallprompt", handleInstallPrompt);
+    window.addEventListener("appinstalled", handleAppInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleInstallPrompt);
+      window.removeEventListener("appinstalled", handleAppInstalled);
+    };
+  }, []);
+
+  const handleInstall = async () => {
+    if (!installPrompt) {
+      toast.info("Open your browser menu and choose Install CareBase to install it on this computer.");
+      return;
+    }
+
+    try {
+      await installPrompt.prompt();
+      await installPrompt.userChoice;
+      setInstallPrompt(null);
+    } catch {
+      toast.error("CareBase could not be installed. Please try again from your browser menu.");
+    }
+  };
+
   const mobileLinks = [
     ["Overview", "/hospital", "dashboard.read"],
     ["Patients", "/hospital/patients", "patients.read"],
@@ -43,6 +94,18 @@ export function CarebaseHeader({
       </div>
       <div className="flex items-center gap-3">
         <DepartmentSwitcher departments={departments} activeDepartmentId={activeDepartmentId} />
+        {!isInstalled && (
+          <button
+            type="button"
+            onClick={handleInstall}
+            aria-label="Install CareBase"
+            title="Install CareBase"
+            className="flex h-10 items-center gap-2 rounded-lg border border-cyan-200 bg-cyan-50 px-3 text-sm font-semibold text-cyan-800 transition hover:bg-cyan-100"
+          >
+            <Download className="size-4" />
+            <span className="hidden sm:inline">Install</span>
+          </button>
+        )}
         <details className="relative lg:hidden">
           <summary className="cursor-pointer list-none rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-700">Menu</summary>
           <div className="absolute right-0 top-12 z-30 min-w-52 rounded-xl border border-slate-200 bg-white p-2 shadow-xl">
