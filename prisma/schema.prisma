@@ -960,12 +960,16 @@ model StaffInvitation {
   expiresAt     DateTime
   acceptedAt    DateTime?
   createdByUserId String
+  linkedInvitationId String?
+  pairedNurseMemberId String?
   hospital      Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
   role          HospitalRole @relation(fields: [roleId], references: [id], onDelete: Restrict)
   department    Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   createdAt     DateTime @default(now())
 
   @@index([hospitalId, status, expiresAt])
+  @@index([linkedInvitationId])
+  @@index([pairedNurseMemberId])
 }
 
 model AuditEvent {

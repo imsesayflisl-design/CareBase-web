@@ -1,22 +1,25 @@
-import { assignNurseToDoctor, inviteHospitalMember, resendHospitalInvitation, revokeHospitalInvitation, setMemberRole, setMemberStatus } from "@/app/actions/carebase-admin";
+import { assignNurseToDoctor, resendHospitalInvitation, revokeHospitalInvitation, setMemberRole, setMemberStatus } from "@/app/actions/carebase-admin";
 import { canAccess, requireCarebasePermission } from "@/lib/carebase/context";
+import { logInviteFailure } from "@/lib/carebase/invites";
 import db from "@/lib/db";
+import { InviteDoctorNurseForm } from "@/components/carebase/invite-doctor-nurse-form";
+import { InviteMemberForm } from "@/components/carebase/invite-member-form";
 import { PageHeader } from "@/components/carebase/page-header";
-import { EmptyState, Field, FormSubmit, Panel, SelectField } from "@/components/carebase/panel";
+import { EmptyState, Panel } from "@/components/carebase/panel";
 import { ExportMenu } from "@/components/carebase/export-button";
 import { StatusBadge } from "@/components/carebase/status-badge";
 import { format } from "date-fns";
 import { BriefcaseMedical, MailPlus, ShieldCheck, Users } from "lucide-react";
 
-export default async function StaffPage() {
-  const context = await requireCarebasePermission("staff.read");
-  const [canManage, canManageRoles] = await Promise.all([
-    canAccess("staff.manage"),
-    canAccess("roles.manage"),
-  ]);
+/**
+ * Loads everything the staff page renders in one go. Kept as a helper so
+ * TypeScript preserves the richer `include` payload types (annotating each
+ * let with `Awaited<ReturnType<findMany>>` erased them and crashed typecheck).
+ */
+async function loadStaffData(hospitalId: string) {
   const [members, roles, departments, invitations, doctors] = await Promise.all([
     db.hospitalMember.findMany({
-      where: { hospitalId: context.hospital.id },
+      where: { hospitalId },
       include: {
         role: true,
         departmentMemberships: { include: { department: true } },
@@ -24,20 +27,48 @@ export default async function StaffPage() {
       },
       orderBy: [{ status: "asc" }, { fullName: "asc" }],
     }),
-    db.hospitalRole.findMany({ where: { hospitalId: context.hospital.id }, orderBy: { name: "asc" } }),
-    db.department.findMany({ where: { hospitalId: context.hospital.id, status: "ACTIVE" }, orderBy: { name: "asc" } }),
+    db.hospitalRole.findMany({ where: { hospitalId }, orderBy: { name: "asc" } }),
+    db.department.findMany({ where: { hospitalId, status: "ACTIVE" }, orderBy: { name: "asc" } }),
     db.staffInvitation.findMany({
-      where: { hospitalId: context.hospital.id, status: { in: ["PENDING", "REVOKED"] } },
+      where: { hospitalId, status: { in: ["PENDING", "REVOKED"] } },
       include: { role: true, department: true },
       orderBy: { createdAt: "desc" },
       take: 12,
     }),
     db.doctorProfile.findMany({
-      where: { hospitalId: context.hospital.id, member: { status: "ACTIVE" } },
+      where: { hospitalId, member: { status: "ACTIVE" } },
       include: { member: true },
       orderBy: { member: { fullName: "asc" } },
     }),
   ]);
+  return { members, roles, departments, invitations, doctors };
+}
+
+type StaffData = Awaited<ReturnType<typeof loadStaffData>>;
+
+const EMPTY_STAFF_DATA: StaffData = {
+  members: [],
+  roles: [],
+  departments: [],
+  invitations: [],
+  doctors: [],
+};
+
+export default async function StaffPage() {
+  const context = await requireCarebasePermission("staff.read");
+  const [canManage, canManageRoles] = await Promise.all([
+    canAccess("staff.manage"),
+    canAccess("roles.manage"),
+  ]);
+  let loadError: string | null = null;
+  let data: Awaited<ReturnType<typeof loadStaffData>> | null = null;
+  try {
+    data = await loadStaffData(context.hospital.id);
+  } catch (error) {
+    logInviteFailure("staff-page-load", error, { hospitalId: context.hospital.id });
+    loadError = "We couldn't load the team list right now. Your data is safe — please refresh.";
+  }
+  const { members, roles, departments, invitations, doctors } = data ?? EMPTY_STAFF_DATA;
   const activeCount = members.filter((member) => member.status === "ACTIVE").length;
   const pendingCount = invitations.filter((invitation) => invitation.status === "PENDING" && invitation.expiresAt > new Date()).length;
 
@@ -56,16 +87,29 @@ export default async function StaffPage() {
       </div>
 
       {canManage && (
-        <details className="mb-5 rounded-2xl border border-cyan-100 bg-cyan-50/50">
-          <summary className="cursor-pointer list-none px-5 py-4 text-sm font-semibold text-cyan-900">+ Invite a team member <span className="ml-2 text-xs font-normal text-cyan-700">A time-limited invitation will be sent by email</span></summary>
-          <form action={inviteHospitalMember} className="grid gap-4 border-t border-cyan-100 bg-white p-5 md:grid-cols-2 xl:grid-cols-4">
-            <Field label="Full name" name="fullName" required />
-            <Field label="Work email" name="email" type="email" required />
-            <SelectField label="Role" name="roleId" required options={roles.map((role) => ({ value: role.id, label: role.name.replaceAll("_", " ") }))} />
-            <SelectField label="Department" name="departmentId" options={departments.map((department) => ({ value: department.id, label: department.name }))} />
-            <div className="xl:col-span-4"><FormSubmit>Send invitation</FormSubmit></div>
-          </form>
+        <details className="mb-5 rounded-2xl border border-cyan-100 bg-cyan-50/50" open>
+          <summary className="cursor-pointer list-none px-5 py-4 text-sm font-semibold text-cyan-900">+ Invite doctor + nurse <span className="ml-2 text-xs font-normal text-cyan-700">Invite both together — links expire after 48 hours</span></summary>
+          <InviteDoctorNurseForm
+            departments={departments.map((d) => ({ id: d.id, name: d.name }))}
+            nurses={members.filter((m) => m.role.name === "NURSE" && m.status === "ACTIVE").map((m) => ({ id: m.id, fullName: m.fullName, email: m.email }))}
+          />
         </details>
+      )}
+
+      {canManage && (
+        <details className="mb-5 rounded-2xl border border-cyan-100 bg-cyan-50/50">
+          <summary className="cursor-pointer list-none px-5 py-4 text-sm font-semibold text-cyan-900">+ Invite a team member <span className="ml-2 text-xs font-normal text-cyan-700">Single invite — links expire after 48 hours</span></summary>
+          <InviteMemberForm
+            roles={roles.map((r) => ({ id: r.id, name: r.name }))}
+            departments={departments.map((d) => ({ id: d.id, name: d.name }))}
+          />
+        </details>
+      )}
+
+      {loadError && (
+        <Panel title="Team list unavailable" description="Please refresh the page.">
+          <p className="text-xs leading-5 text-rose-600">{loadError}</p>
+        </Panel>
       )}
 
       <Panel title="Hospital team" description="Each person only receives the permissions assigned to their hospital role.">
@@ -109,7 +153,7 @@ export default async function StaffPage() {
       )}
 
       <div className="mt-5">
-        <Panel title="Recent invitations" description="Invitations expire after seven days and can only be used by the invited email.">
+        <Panel title="Recent invitations" description="Invitations expire after 48 hours and can only be used by the invited email.">
           {invitations.length ? <div className="divide-y divide-slate-100">
             {invitations.map((invitation) => <div key={invitation.id} className="flex flex-wrap items-center gap-3 py-3 first:pt-0 last:pb-0"><span className="flex size-9 items-center justify-center rounded-lg bg-cyan-50 text-cyan-700"><MailPlus className="size-4" /></span><div className="min-w-52 flex-1"><p className="text-xs font-semibold text-slate-800">{invitation.fullName} <span className="font-normal text-slate-500">· {invitation.email}</span></p><p className="mt-1 text-[10px] text-slate-500">{invitation.role.name} {invitation.department ? "· " + invitation.department.name : ""} · Expires {format(invitation.expiresAt, "MMM d")}</p></div><StatusBadge status={invitation.status === "PENDING" && invitation.expiresAt < new Date() ? "EXPIRED" : invitation.status} />{canManage && invitation.status === "PENDING" && invitation.expiresAt > new Date() && <form action={resendHospitalInvitation}><input type="hidden" name="id" value={invitation.id} /><button className="text-[10px] font-semibold text-cyan-700 hover:text-cyan-900">Resend</button></form>}{canManage && invitation.status === "PENDING" && invitation.expiresAt > new Date() && <form action={revokeHospitalInvitation}><input type="hidden" name="id" value={invitation.id} /><button className="text-[10px] font-semibold text-rose-600 hover:text-rose-800">Revoke</button></form>}</div>)}
           </div> : <p className="text-xs text-slate-500">No invitations have been sent.</p>}

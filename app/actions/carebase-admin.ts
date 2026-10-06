@@ -1,14 +1,28 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { headers } from "next/headers";
-import { createHash, randomBytes } from "crypto";
 import { clerkClient } from "@clerk/nextjs/server";
 import db from "@/lib/db";
 import { recordCarebaseAudit } from "@/lib/carebase/audit";
 import { sendStaffInvitationEmail } from "@/lib/carebase/invitation-email";
 import { requireCarebasePermission } from "@/lib/carebase/context";
+import {
+  EMAIL_RE,
+  acceptUrlFor,
+  inviteExpiry,
+  inviteOrigin,
+  logInviteFailure,
+  mintInviteToken,
+  normalizeEmail,
+} from "@/lib/carebase/invites";
 import { CAREBASE_PERMISSIONS } from "@/lib/carebase/permissions";
+
+export type InviteActionResult = {
+  success: boolean;
+  message: string;
+  sentDoctor?: string;
+  sentNurse?: string;
+};
 
 export async function createDepartment(formData: FormData) {
   const context = await requireCarebasePermission("departments.manage");
@@ -61,14 +75,82 @@ export async function deleteDepartment(formData: FormData) {
   revalidatePath("/hospital", "layout");
 }
 
-export async function inviteHospitalMember(formData: FormData) {
-  const context = await requireCarebasePermission("staff.manage");
-  const email = String(formData.get("email") ?? "").trim().toLowerCase();
-  const fullName = String(formData.get("fullName") ?? "").trim();
-  const roleId = String(formData.get("roleId") ?? "");
-  const departmentId = String(formData.get("departmentId") ?? "") || null;
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Enter a valid email address.");
-  if (fullName.length < 2) throw new Error("Enter the staff member's name.");
+/**
+ * Creates ONE invitation row + sends its Resend email inside a logged,
+ * crash-safe wrapper. Returns a result object — never throws for expected
+ * failures — so the staff page can't land in the error boundary.
+ */
+async function createSingleInvite(args: {
+  hospitalId: string;
+  hospitalName: string;
+  createdByUserId: string;
+  roleId: string;
+  roleName: string;
+  departmentId: string | null;
+  departmentName: string | null;
+  email: string;
+  fullName: string;
+  origin: string;
+  linkedInvitationId?: string | null;
+}): Promise<{ ok: true; invitationId: string; acceptUrl: string } | { ok: false; message: string }> {
+  const { token, tokenHash } = mintInviteToken();
+  const invitation = await db.staffInvitation.create({
+    data: {
+      hospitalId: args.hospitalId,
+      roleId: args.roleId,
+      departmentId: args.departmentId,
+      email: args.email,
+      fullName: args.fullName,
+      tokenHash,
+      expiresAt: inviteExpiry(),
+      createdByUserId: args.createdByUserId,
+      linkedInvitationId: args.linkedInvitationId ?? null,
+    },
+  });
+  const acceptUrl = acceptUrlFor(args.origin, token);
+
+  const emailResult = await sendStaffInvitationEmail({
+    to: args.email,
+    fullName: args.fullName,
+    hospitalName: args.hospitalName,
+    roleName: args.roleName,
+    departmentName: args.departmentName,
+    acceptUrl,
+    expiresAt: invitation.expiresAt,
+  });
+  if (!emailResult.sent) {
+    await db.staffInvitation.delete({ where: { id: invitation.id } }).catch(() => undefined);
+    return { ok: false, message: emailResult.error ?? "The invitation email could not be delivered." };
+  }
+
+  try {
+    const client = await clerkClient();
+    const clerkInvitation = await client.invitations.createInvitation({
+      emailAddress: args.email,
+      redirectUrl: acceptUrl,
+      publicMetadata: { carebaseInvitationId: invitation.id },
+      notify: false,
+      ignoreExisting: true,
+    });
+    await db.staffInvitation.update({
+      where: { id: invitation.id },
+      data: { clerkInvitationId: clerkInvitation.id },
+    });
+  } catch (error) {
+    logInviteFailure("clerk-register", error, { invitationId: invitation.id, email: args.email });
+  }
+  return { ok: true, invitationId: invitation.id, acceptUrl };
+}
+
+export async function inviteHospitalMember(formData: FormData): Promise<InviteActionResult> {
+  try {
+    const context = await requireCarebasePermission("staff.manage");
+    const email = normalizeEmail(formData.get("email"));
+    const fullName = String(formData.get("fullName") ?? "").trim();
+    const roleId = String(formData.get("roleId") ?? "");
+    const departmentId = String(formData.get("departmentId") ?? "") || null;
+    if (!EMAIL_RE.test(email)) return { success: false, message: "Enter a valid email address." };
+    if (fullName.length < 2) return { success: false, message: "Enter the staff member's name." };
 
   const [role, department, existingMember, existingInvite] = await Promise.all([
     db.hospitalRole.findFirst({ where: { id: roleId, hospitalId: context.hospital.id } }),
@@ -80,82 +162,37 @@ export async function inviteHospitalMember(formData: FormData) {
       where: { hospitalId: context.hospital.id, email, status: "PENDING", expiresAt: { gt: new Date() } },
     }),
   ]);
-  if (!role) throw new Error("Choose a role from this hospital.");
-  if (departmentId && !department) throw new Error("Choose a department from this hospital.");
-  if (existingMember) throw new Error("This person is already on the hospital team.");
-  if (existingInvite) throw new Error("There is already an active invitation for this email.");
+  if (!role) return { success: false, message: "Choose a role from this hospital." };
+  if (departmentId && !department) return { success: false, message: "Choose a department from this hospital." };
+  if (existingMember) return { success: false, message: "This person is already on the hospital team." };
+  if (existingInvite) return { success: false, message: "There is already an active invitation for this email." };
 
-  const token = randomBytes(32).toString("hex");
-  const tokenHash = createHash("sha256").update(token).digest("hex");
-  const invitation = await db.staffInvitation.create({
-    data: {
-      hospitalId: context.hospital.id,
-      roleId: role.id,
-      departmentId,
-      email,
-      fullName,
-      tokenHash,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-      createdByUserId: context.userId,
-    },
-  });
-
-  const requestHeaders = await headers();
-  const origin =
-    requestHeaders.get("origin") ??
-    (process.env.NEXT_PUBLIC_APP_URL
-      ? "https://" + process.env.NEXT_PUBLIC_APP_URL.replace(/^https?:\/\//, "")
-      : null) ??
-    (process.env.VERCEL_URL ? "https://" + process.env.VERCEL_URL : null) ??
-    "http://localhost:3000";
-  const acceptUrl = origin + "/invitation/accept?token=" + token;
-
-  // Resend is the sender. Send the invite email through Resend FIRST — if it
-  // fails, abort so the owner sees the real error instead of a silent invite.
-  const emailResult = await sendStaffInvitationEmail({
-    to: email,
-    fullName,
+  const origin = await inviteOrigin();
+  const created = await createSingleInvite({
+    hospitalId: context.hospital.id,
     hospitalName: context.hospital.name,
+    createdByUserId: context.userId,
+    roleId: role.id,
     roleName: role.name,
+    departmentId,
     departmentName: department?.name ?? null,
-    acceptUrl,
-    expiresAt: invitation.expiresAt,
+    email,
+    fullName,
+    origin,
   });
-  if (!emailResult.sent) {
-    await db.staffInvitation.delete({ where: { id: invitation.id } });
-    throw new Error(emailResult.error ?? "The invitation email could not be delivered.");
-  }
+  if (!created.ok) return { success: false, message: created.message };
 
-  // Register the invite with Clerk WITHOUT notifying (notify: false) so only
-  // Resend sends the email — no duplicates. If Clerk registration fails, keep
-  // our invitation (the Resend link still works) and log it.
-  let clerkFailed: string | null = null;
-  try {
-    const client = await clerkClient();
-    const clerkInvitation = await client.invitations.createInvitation({
-      emailAddress: email,
-      redirectUrl: acceptUrl,
-      publicMetadata: { carebaseInvitationId: invitation.id },
-      notify: false,
-      ignoreExisting: true,
-    });
-    await db.staffInvitation.update({
-      where: { id: invitation.id },
-      data: { clerkInvitationId: clerkInvitation.id },
-    });
-  } catch (error) {
-    clerkFailed = error instanceof Error ? error.message : "Clerk invitation failed.";
-    console.error("Clerk invitation registration failed (Resend email already sent):", clerkFailed);
-  }
-
-  await recordCarebaseAudit(context, "staff.invited", "StaffInvitation", invitation.id, {
+  await recordCarebaseAudit(context, "staff.invited", "StaffInvitation", created.invitationId, {
     email,
     role: role.name,
     resendSent: true,
-    clerkRegistered: !clerkFailed,
-    ...(clerkFailed ? { clerkError: clerkFailed } : {}),
   });
   revalidatePath("/hospital/staff");
+  return { success: true, message: `Invitation sent to ${email}. It expires in 48 hours.` };
+  } catch (error) {
+    logInviteFailure("invite-member", error);
+    return { success: false, message: "We couldn't send that invitation right now. Please try again." };
+  }
 }
 
 export async function revokeHospitalInvitation(formData: FormData) {
@@ -167,8 +204,13 @@ export async function revokeHospitalInvitation(formData: FormData) {
   if (!invitation) throw new Error("Invitation not found.");
 
   if (invitation.clerkInvitationId) {
-    const client = await clerkClient();
-    await client.invitations.revokeInvitation(invitation.clerkInvitationId);
+    try {
+      const client = await clerkClient();
+      await client.invitations.revokeInvitation(invitation.clerkInvitationId);
+    } catch (error) {
+      // Best effort — the DB row is the source of truth for revocation.
+      logInviteFailure("clerk-revoke", error, { invitationId: invitation.id });
+    }
   }
   await db.staffInvitation.update({
     where: { id: invitation.id },
@@ -185,35 +227,60 @@ export async function resendHospitalInvitation(formData: FormData) {
   const context = await requireCarebasePermission("staff.manage");
   const id = String(formData.get("id") ?? "");
   const invitation = await db.staffInvitation.findFirst({
-    where: { id, hospitalId: context.hospital.id, status: "PENDING", expiresAt: { gt: new Date() } },
+    where: { id, hospitalId: context.hospital.id, status: { in: ["PENDING", "EXPIRED"] } },
     include: { role: true, department: true },
   });
-  if (!invitation) throw new Error("Invitation not found or expired.");
+  if (!invitation) throw new Error("Invitation not found.");
 
-  const requestHeaders = await headers();
-  const origin =
-    requestHeaders.get("origin") ??
-    (process.env.NEXT_PUBLIC_APP_URL
-      ? "https://" + process.env.NEXT_PUBLIC_APP_URL.replace(/^https?:\/\//, "")
-      : null) ??
-    (process.env.VERCEL_URL ? "https://" + process.env.VERCEL_URL : null) ??
-    "http://localhost:3000";
-  // NOTE: the token itself is not stored — only its hash — so a resend
-  // delivers a fresh Resend email pointing at /invitation/accept (the invitee
-  // signs in with the invited email, then accepts). If they lost the original
-  // token link, revoke + re-invite to mint a new one.
+  // Only the token hash is stored, so a resend rotates the token and refreshes
+  // the 48h window — the emailed link always points at a valid, expiring URL.
+  const origin = await inviteOrigin();
+  const rotated = mintInviteToken();
+  const expiresAt = inviteExpiry();
+  const acceptUrl = acceptUrlFor(origin, rotated.token);
+  const previous = { tokenHash: invitation.tokenHash, expiresAt: invitation.expiresAt };
+  await db.staffInvitation.update({
+    where: { id: invitation.id },
+    data: { tokenHash: rotated.tokenHash, expiresAt, status: "PENDING" },
+  });
+
   const result = await sendStaffInvitationEmail({
     to: invitation.email,
     fullName: invitation.fullName,
     hospitalName: context.hospital.name,
     roleName: invitation.role.name,
     departmentName: invitation.department?.name ?? null,
-    acceptUrl: origin + "/invitation/accept",
-    expiresAt: invitation.expiresAt,
+    acceptUrl,
+    expiresAt,
   });
-  if (!result.sent) throw new Error(result.error ?? "The invitation email could not be delivered.");
+  if (!result.sent) {
+    // Roll back so a failed resend never strands the row with a dead token.
+    await db.staffInvitation
+      .update({ where: { id: invitation.id }, data: previous })
+      .catch(() => undefined);
+    throw new Error(result.error ?? "The invitation email could not be delivered.");
+  }
 
-  await recordCarebaseAudit(context, "staff.invitation_resent", "StaffInvitation", id, {
+  try {
+    // This SDK exposes no invitation update — re-register with
+    // ignoreExisting so the reservation carries the fresh token URL.
+    const client = await clerkClient();
+    const created = await client.invitations.createInvitation({
+      emailAddress: invitation.email,
+      redirectUrl: acceptUrl,
+      publicMetadata: { carebaseInvitationId: invitation.id },
+      notify: false,
+      ignoreExisting: true,
+    });
+    await db.staffInvitation.update({
+      where: { id: invitation.id },
+      data: { clerkInvitationId: created.id },
+    });
+  } catch (error) {
+    logInviteFailure("clerk-resent-redirect", error, { invitationId: invitation.id });
+  }
+
+  await recordCarebaseAudit(context, "staff.invitation_resent", "StaffInvitation", invitation.id, {
     email: invitation.email,
   });
   revalidatePath("/hospital/staff");
