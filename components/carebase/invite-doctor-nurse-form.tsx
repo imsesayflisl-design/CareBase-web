@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useEffect, useState } from "react";
-import { Loader2, Stethoscope } from "lucide-react";
+import { Check, Copy, Loader2, Stethoscope } from "lucide-react";
 import { toast } from "sonner";
 import type { InviteActionResult } from "@/app/actions/carebase-admin";
 import { inviteDoctorWithNurse } from "@/app/actions/carebase-doctor-nurse-invite";
@@ -59,6 +59,22 @@ export function InviteDoctorNurseForm({
     if (state.success) toast.success(state.message);
     else toast.error(state.message);
   }, [state]);
+  const [linkCopied, setLinkCopied] = useState(false);
+
+  useEffect(() => {
+    setLinkCopied(false);
+  }, [state.acceptUrl]);
+
+  async function copyDoctorLink() {
+    if (!state.acceptUrl) return;
+    try {
+      await navigator.clipboard.writeText(state.acceptUrl);
+      setLinkCopied(true);
+      toast.success("Doctor invite link copied.");
+    } catch {
+      toast.error("Copy failed — select the link text manually.");
+    }
+  }
 
   const input =
     "h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10 disabled:opacity-60";
@@ -137,6 +153,22 @@ export function InviteDoctorNurseForm({
         <p className={`mt-4 rounded-lg px-3 py-2 text-xs font-medium ${state.success ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
           {state.message}
         </p>
+      )}
+      {state.success && state.acceptUrl && (
+        <div className="mt-3 flex flex-col gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 sm:flex-row sm:items-center">
+          <p className="min-w-0 flex-1 truncate text-xs text-amber-900">
+            <span className="font-semibold">Share this doctor link:</span>{" "}
+            <span className="font-mono">{state.acceptUrl}</span>
+          </p>
+          <button
+            type="button"
+            onClick={copyDoctorLink}
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg bg-amber-600 px-3 text-xs font-semibold text-white transition hover:bg-amber-700"
+          >
+            {linkCopied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+            {linkCopied ? "Copied" : "Copy link"}
+          </button>
+        </div>
       )}
 
       <div className="mt-4">

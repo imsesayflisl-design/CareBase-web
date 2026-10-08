@@ -5,6 +5,7 @@ import { clerkClient } from "@clerk/nextjs/server";
 import db from "@/lib/db";
 import { recordCarebaseAudit } from "@/lib/carebase/audit";
 import { sendStaffInvitationEmail } from "@/lib/carebase/invitation-email";
+import { tryClerkFallbackInvite } from "@/lib/carebase/invite-delivery";
 import { requireCarebasePermission } from "@/lib/carebase/context";
 import type { InviteActionResult } from "@/app/actions/carebase-admin";
 import {
@@ -100,12 +101,41 @@ export async function inviteDoctorWithNurse(formData: FormData): Promise<InviteA
       return { doctor, nurse };
     });
 
+    const doctorAcceptUrl = acceptUrlFor(origin, doctorToken.token);
     const doctorSent = await sendStaffInvitationEmail({
       to: doctorEmail, fullName: doctorName, hospitalName: context.hospital.name,
       roleName: doctorRole.name, departmentName: department.name,
-      acceptUrl: acceptUrlFor(origin, doctorToken.token), expiresAt: inviteExpiry(),
+      acceptUrl: doctorAcceptUrl, expiresAt: inviteExpiry(),
     });
     if (!doctorSent.sent) {
+      // Test-mode Resend sender: keep the rows and fall back to Clerk email
+      // (or a manual link) instead of deleting the invites.
+      if (doctorSent.isDomainError) {
+        const fallback = await tryClerkFallbackInvite({
+          email: doctorEmail,
+          acceptUrl: doctorAcceptUrl,
+          invitationId: created.doctor.id,
+        });
+        if (fallback.clerkInvitationId) {
+          await db.staffInvitation
+            .update({
+              where: { id: created.doctor.id },
+              data: { clerkInvitationId: fallback.clerkInvitationId },
+            })
+            .catch(() => undefined);
+        }
+        await recordCarebaseAudit(context, "staff.doctor_nurse_invited", "StaffInvitation", created.doctor.id, {
+          doctorEmail, department: department.name,
+          via: fallback.ok ? "clerk-fallback" : "manual-link",
+        });
+        revalidatePath("/hospital/staff");
+        return {
+          success: true,
+          message: `Doctor invitation created for ${doctorEmail} (Resend test mode can't email external addresses). Share the link below — it expires in 48 hours.`,
+          sentDoctor: doctorEmail,
+          acceptUrl: doctorAcceptUrl,
+        };
+      }
       await db.staffInvitation.deleteMany({ where: { id: { in: [created.doctor.id, created.nurse?.id].filter(Boolean) as string[] } } }).catch(() => undefined);
       return { success: false, message: doctorSent.error ?? "The doctor invitation email could not be delivered." };
     }

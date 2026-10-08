@@ -5,6 +5,7 @@ import { clerkClient } from "@clerk/nextjs/server";
 import db from "@/lib/db";
 import { recordCarebaseAudit } from "@/lib/carebase/audit";
 import { sendStaffInvitationEmail } from "@/lib/carebase/invitation-email";
+import { tryClerkFallbackInvite } from "@/lib/carebase/invite-delivery";
 import { requireCarebasePermission } from "@/lib/carebase/context";
 import {
   EMAIL_RE,
@@ -16,30 +17,47 @@ import {
   normalizeEmail,
 } from "@/lib/carebase/invites";
 import { CAREBASE_PERMISSIONS } from "@/lib/carebase/permissions";
+import { findOrCreateDepartment } from "@/lib/carebase/departments";
 
 export type InviteActionResult = {
   success: boolean;
   message: string;
   sentDoctor?: string;
   sentNurse?: string;
+  /** Fallback accept URL when email delivery failed but the invite row was kept — the owner can copy/share it manually. */
+  acceptUrl?: string;
 };
 
-export async function createDepartment(formData: FormData) {
+/** Shape returned by `createDepartment` (used by the departments page). */
+export type CreateDepartmentResult = {
+  success: boolean;
+  message: string;
+  departmentId?: string;
+};
+
+/**
+ * Idempotent department creation: re-using a seeded preset (e.g. "Cardiology")
+ * resolves to the existing department instead of throwing a unique-constraint
+ * error. Returns the department id and whether it was newly created.
+ */
+export async function createDepartment(formData: FormData): Promise<CreateDepartmentResult> {
   const context = await requireCarebasePermission("departments.manage");
   const name = String(formData.get("name") ?? "").trim();
-  if (name.length < 2) throw new Error("Department name is required.");
+  if (name.length < 2) return { success: false, message: "Department name is required." };
 
-  const department = await db.department.create({
-    data: {
-      hospitalId: context.hospital.id,
-      name,
-      description: String(formData.get("description") ?? "").trim() || null,
-      location: String(formData.get("location") ?? "").trim() || null,
-      contact: String(formData.get("contact") ?? "").trim() || null,
-    },
-  });
-  await recordCarebaseAudit(context, "department.created", "Department", department.id, { name });
+  const { id, created } = await findOrCreateDepartment(
+    context,
+    name,
+    String(formData.get("description") ?? ""),
+  );
+
+  if (!created) {
+    return { success: true, message: `Department "${name}" already exists, so no new department was created.` };
+  }
+
+  await recordCarebaseAudit(context, "department.created", "Department", id, { name });
   revalidatePath("/hospital/departments");
+  return { success: true, message: `Department "${name}" created.`, departmentId: id };
 }
 
 export async function setDepartmentStatus(formData: FormData) {
@@ -92,7 +110,7 @@ async function createSingleInvite(args: {
   fullName: string;
   origin: string;
   linkedInvitationId?: string | null;
-}): Promise<{ ok: true; invitationId: string; acceptUrl: string } | { ok: false; message: string }> {
+}): Promise<{ ok: true; invitationId: string; acceptUrl: string; emailed: boolean } | { ok: false; message: string }> {
   const { token, tokenHash } = mintInviteToken();
   const invitation = await db.staffInvitation.create({
     data: {
@@ -119,6 +137,31 @@ async function createSingleInvite(args: {
     expiresAt: invitation.expiresAt,
   });
   if (!emailResult.sent) {
+    // Resend test-mode (onboarding@resend.dev / unverified domain) can only
+    // email the Resend account owner — fall back to Clerk's own invitation
+    // email instead of failing the invite. Any other delivery error still
+    // deletes the row, since the address itself may be undeliverable.
+    if (emailResult.isDomainError) {
+      const fallback = await tryClerkFallbackInvite({
+        email: args.email,
+        acceptUrl,
+        invitationId: invitation.id,
+      });
+      if (fallback.ok) {
+        if (fallback.clerkInvitationId) {
+          await db.staffInvitation
+            .update({
+              where: { id: invitation.id },
+              data: { clerkInvitationId: fallback.clerkInvitationId },
+            })
+            .catch(() => undefined);
+        }
+        return { ok: true, invitationId: invitation.id, acceptUrl, emailed: true };
+      }
+      // Even when both senders fail, KEEP the row and hand the owner a
+      // copyable link — deleting the invite would strand them with nothing.
+      return { ok: true, invitationId: invitation.id, acceptUrl, emailed: false };
+    }
     await db.staffInvitation.delete({ where: { id: invitation.id } }).catch(() => undefined);
     return { ok: false, message: emailResult.error ?? "The invitation email could not be delivered." };
   }
@@ -139,7 +182,7 @@ async function createSingleInvite(args: {
   } catch (error) {
     logInviteFailure("clerk-register", error, { invitationId: invitation.id, email: args.email });
   }
-  return { ok: true, invitationId: invitation.id, acceptUrl };
+  return { ok: true, invitationId: invitation.id, acceptUrl, emailed: true };
 }
 
 export async function inviteHospitalMember(formData: FormData): Promise<InviteActionResult> {
@@ -188,7 +231,14 @@ export async function inviteHospitalMember(formData: FormData): Promise<InviteAc
     resendSent: true,
   });
   revalidatePath("/hospital/staff");
-  return { success: true, message: `Invitation sent to ${email}. It expires in 48 hours.` };
+  if (created.emailed) {
+    return { success: true, message: `Invitation sent to ${email}. It expires in 48 hours.` };
+  }
+  return {
+    success: true,
+    message: `Invitation created for ${email} (Resend test mode can't email external addresses, but the invite was saved). Share the link below — it expires in 48 hours.`,
+    acceptUrl: created.acceptUrl,
+  };
   } catch (error) {
     logInviteFailure("invite-member", error);
     return { success: false, message: "We couldn't send that invitation right now. Please try again." };
@@ -254,6 +304,33 @@ export async function resendHospitalInvitation(formData: FormData) {
     expiresAt,
   });
   if (!result.sent) {
+    // Resend test-mode sender (onboarding@resend.dev / unverified domain):
+    // keep the rotated token and fall back to Clerk delivery instead of
+    // rolling back — a Resend config gap must not invalidate the invite.
+    if (result.isDomainError) {
+      const fallback = await tryClerkFallbackInvite({
+        email: invitation.email,
+        acceptUrl,
+        invitationId: invitation.id,
+      });
+      if (fallback.clerkInvitationId) {
+        await db.staffInvitation
+          .update({
+            where: { id: invitation.id },
+            data: { clerkInvitationId: fallback.clerkInvitationId },
+          })
+          .catch(() => undefined);
+      }
+      await recordCarebaseAudit(context, "staff.invitation_resent", "StaffInvitation", invitation.id, {
+        email: invitation.email,
+        via: fallback.ok ? "clerk-fallback" : "manual-link",
+      });
+      revalidatePath("/hospital/staff");
+      if (fallback.ok) return;
+      throw new Error(
+        `Resend test mode can't email ${invitation.email} — but the invite link was refreshed. Copy it from the staff list (expires in 48 hours).`,
+      );
+    }
     // Roll back so a failed resend never strands the row with a dead token.
     await db.staffInvitation
       .update({ where: { id: invitation.id }, data: previous })

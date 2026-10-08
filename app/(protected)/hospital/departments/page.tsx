@@ -1,4 +1,4 @@
-import { createDepartment, deleteDepartment, setDepartmentStatus } from "@/app/actions/carebase-admin";
+import { createDepartment, type CreateDepartmentResult } from "@/app/actions/carebase-admin";
 import { canAccess, requireCarebasePermission } from "@/lib/carebase/context";
 import db from "@/lib/db";
 import { PageHeader } from "@/components/carebase/page-header";

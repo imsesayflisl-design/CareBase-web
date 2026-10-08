@@ -6,6 +6,7 @@ import db from "@/lib/db";
 import { recordCarebaseAudit } from "@/lib/carebase/audit";
 import { getCarebaseContext } from "@/lib/carebase/context";
 import { sendStaffInvitationEmail } from "@/lib/carebase/invitation-email";
+import { tryClerkFallbackInvite } from "@/lib/carebase/invite-delivery";
 import {
   EMAIL_RE,
   acceptUrlFor,
@@ -194,22 +195,41 @@ export async function completeNurseOnboarding(
       expiresAt,
     });
     if (!emailResult.sent) {
-      // Compensate so a failed send leaves no dangling pending invitation.
-      await db.staffInvitation
-        .delete({ where: { id: invitation.id } })
-        .catch(() => undefined);
-      if (doctorInvite && !doctorInvite.linkedInvitationId) {
+      // Resend test-mode sender can't email external addresses — keep the
+      // invite and fall back to Clerk email (or a manual link) instead of
+      // deleting it.
+      if (emailResult.isDomainError) {
+        const fallback = await tryClerkFallbackInvite({
+          email: nurseEmail,
+          acceptUrl,
+          invitationId: invitation.id,
+        });
+        if (fallback.clerkInvitationId) {
+          await db.staffInvitation
+            .update({
+              where: { id: invitation.id },
+              data: { clerkInvitationId: fallback.clerkInvitationId },
+            })
+            .catch(() => undefined);
+        }
+      } else {
+        // Compensate so a failed send leaves no dangling pending invitation.
         await db.staffInvitation
-          .update({ where: { id: doctorInvite.id }, data: { linkedInvitationId: null } })
+          .delete({ where: { id: invitation.id } })
           .catch(() => undefined);
+        if (doctorInvite && !doctorInvite.linkedInvitationId) {
+          await db.staffInvitation
+            .update({ where: { id: doctorInvite.id }, data: { linkedInvitationId: null } })
+            .catch(() => undefined);
+        }
+        logInviteFailure("onboarding-nurse-email", new Error(emailResult.error ?? "unknown"), {
+          invitationId: invitation.id,
+        });
+        return {
+          success: false,
+          message: emailResult.error ?? "The nurse invitation email could not be delivered. Try again or skip for now.",
+        };
       }
-      logInviteFailure("onboarding-nurse-email", new Error(emailResult.error ?? "unknown"), {
-        invitationId: invitation.id,
-      });
-      return {
-        success: false,
-        message: emailResult.error ?? "The nurse invitation email could not be delivered. Try again or skip for now.",
-      };
     }
 
     try {

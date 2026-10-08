@@ -141,6 +141,7 @@ enum ImportBatchStatus {
 
 model Patient {
   id                       String   @id //clerk userId
+  patientCode              String?  @unique
   first_name               String
   last_name                String
   date_of_birth            DateTime
@@ -419,8 +420,14 @@ model Hospital {
   timezone          String   @default("Africa/Freetown")
   currency          String   @default("SLE")
   openingHours      Json?
+  latitude          Float?
+  longitude         Float?
   services          String[] @default([])
   status            CareStatus @default(ACTIVE)
+  pharmacies          Pharmacy[]
+  scanBookings        ScanBooking[]
+  emergencyRequests   EmergencyRequest[]
+  patientNotifications PatientNotification[]
   createdByUserId   String
   members           HospitalMember[]
   roles             HospitalRole[]
@@ -637,6 +644,8 @@ model CarePatient {
   diagnosticOrders      DiagnosticOrder[]
   bedRequests           BedRequest[]
   payments              HospitalPayment[]
+  scanBookings          ScanBooking[]
+  emergencyRequests     EmergencyRequest[]
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
@@ -648,6 +657,7 @@ model CarePatient {
 
 model CareAppointment {
   id                 String @id @default(cuid())
+  reference          String? @unique
   hospitalId         String
   patientId          String
   doctorId           String?
@@ -752,6 +762,7 @@ model DiagnosticService {
   hospital               Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
   department             Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
   orders                 DiagnosticOrder[]
+  scanBookings           ScanBooking[]
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
@@ -1024,5 +1035,164 @@ model StaffImportBatch {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
+  @@index([hospitalId, status, createdAt])
+}
+
+model EmailOtp {
+  id         String    @id @default(cuid())
+  email      String
+  codeHash   String
+  purpose    String    @default("SIGN_IN")
+  attempts   Int       @default(0)
+  consumedAt DateTime?
+  expiresAt  DateTime
+  createdAt  DateTime  @default(now())
+
+  @@index([email, purpose, createdAt])
+  @@index([expiresAt])
+}
+
+model PatientNotification {
+  id           String    @id @default(cuid())
+  userId       String
+  hospitalId   String?
+  title        String
+  body         String
+  category     String
+  resourceType String?
+  resourceId   String?
+  href         String?
+  readAt       DateTime?
+  createdAt    DateTime  @default(now())
+  hospital     Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+  @@index([hospitalId, createdAt])
+}
+
+model PatientPushToken {
+  id         String   @id @default(cuid())
+  userId     String
+  token      String   @unique
+  platform   String   @default("expo")
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Pharmacy {
+  id                 String        @id @default(cuid())
+  hospitalId         String?
+  ownerUserId        String?
+  name               String
+  address            String?
+  city               String?
+  region             String?
+  latitude           Float?
+  longitude          Float?
+  phone              String?
+  email              String?
+  openingHours       Json?
+  services           String[]      @default([])
+  deliveryAvailable  Boolean       @default(false)
+  status             CareStatus    @default(ACTIVE)
+  hospital           Hospital?     @relation(fields: [hospitalId], references: [id], onDelete: SetNull)
+  inventory          PharmacyInventory[]
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@index([status, city])
+  @@index([status])
+}
+
+model Medicine {
+  id          String   @id @default(cuid())
+  name        String
+  genericName String?
+  category    String?
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  inventory   PharmacyInventory[]
+
+  @@index([name])
+}
+
+model PharmacyInventory {
+  id           String    @id @default(cuid())
+  pharmacyId   String
+  medicineId   String
+  price        Float?
+  currency     String    @default("SLE")
+  inStock      Boolean   @default(true)
+  lastUpdated  DateTime  @default(now())
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  pharmacy     Pharmacy  @relation(fields: [pharmacyId], references: [id], onDelete: Cascade)
+  medicine     Medicine  @relation(fields: [medicineId], references: [id], onDelete: Cascade)
+
+  @@unique([pharmacyId, medicineId])
+  @@index([medicineId, inStock])
+}
+
+enum ScanBookingStatus {
+  REQUESTED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  REPORT_READY
+  CANCELLED
+}
+
+model ScanBooking {
+  id             String            @id @default(cuid())
+  reference      String            @unique
+  hospitalId     String
+  patientId      String
+  serviceId      String
+  scheduledDate  String?
+  scheduledTime  String?
+  homeVisit      Boolean           @default(false)
+  status         ScanBookingStatus @default(REQUESTED)
+  notes          String?
+  reportUrl      String?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  hospital       Hospital          @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient        CarePatient       @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  service        DiagnosticService @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+
+  @@index([hospitalId, status, createdAt])
+  @@index([hospitalId, patientId, createdAt])
+}
+
+enum EmergencyRequestStatus {
+  REQUESTED
+  RECEIVED
+  ACCEPTED
+  RESPONDING
+  COMPLETED
+  CANCELLED
+}
+
+model EmergencyRequest {
+  id            String                  @id @default(cuid())
+  reference     String                  @unique
+  userId        String
+  hospitalId    String?
+  patientId     String?
+  latitude      Float?
+  longitude     Float?
+  emergencyType String
+  contactPhone  String?
+  notes         String?
+  status        EmergencyRequestStatus  @default(REQUESTED)
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+  hospital      Hospital?               @relation(fields: [hospitalId], references: [id], onDelete: SetNull)
+  patient       CarePatient?            @relation(fields: [patientId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
   @@index([hospitalId, status, createdAt])
 }

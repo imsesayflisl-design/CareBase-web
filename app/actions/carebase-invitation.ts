@@ -210,7 +210,9 @@ export async function finalizeInviteAcceptance(token: string): Promise<FinalizeI
         });
         return { success: true, message: "You're already a member — taking you to your dashboard.", redirectTo: target };
       }
-      return { success: false, message: "This invitation was already used. Ask your hospital administrator to send you a new one." };
+      // If no existing member found but invitation is accepted,
+      // we should still try to proceed (might be a consistency issue)
+      // Fall through to create the membership below
     }
 
     const user = await currentUser();

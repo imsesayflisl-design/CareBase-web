@@ -148,6 +148,14 @@ export async function POST(request: Request) {
   if (collision) return jsonError("That doctor already has an appointment at that time", 409);
 
   const appointment = await db.$transaction(async (tx) => {
+    const latest = await tx.careAppointment.findFirst({
+      where: { reference: { startsWith: `APT-SL-${new Date().getFullYear()}-` } },
+      orderBy: { reference: "desc" },
+      select: { reference: true },
+    });
+    const prefix = `APT-SL-${new Date().getFullYear()}-`;
+    const lastNumber = latest?.reference ? Number(latest.reference.slice(prefix.length)) || 0 : 0;
+    const reference = `${prefix}${String(lastNumber + 1).padStart(6, "0")}`;
     const created = await tx.careAppointment.create({
       data: {
         hospitalId,
@@ -159,8 +167,9 @@ export async function POST(request: Request) {
         appointmentType,
         reason: reason || null,
         status: "REQUESTED",
+        reference,
       },
-      select: { id: true, appointmentDate: true, time: true, status: true },
+      select: { id: true, reference: true, appointmentDate: true, time: true, status: true },
     });
     await tx.hospitalNotification.create({
       data: {

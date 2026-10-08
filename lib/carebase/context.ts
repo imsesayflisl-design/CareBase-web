@@ -3,6 +3,7 @@ import "server-only";
 import { auth } from "@clerk/nextjs/server";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { cache } from "react";
 import db from "@/lib/db";
 import type { Department, HospitalMember, HospitalRole, Hospital, Prisma } from "@prisma/client";
 import type { CarebasePermission } from "./permissions";
@@ -18,7 +19,14 @@ export type CarebaseContext = {
   activeDepartment: Department | null;
 };
 
-export async function getCarebaseContext(): Promise<CarebaseContext | null> {
+/**
+ * Deduped per-request with React `cache()` so multiple calls during one
+ * render (layout + page + components, or `auth()` + this in `app/page.tsx`)
+ * share a single DB round-trip instead of each opening pool connections.
+ * Without this, concurrent renders each hold a pooled connection and Neon
+ * throws P2024 "Timed out fetching a new connection from the pool".
+ */
+export const getCarebaseContext = cache(async function getCarebaseContext(): Promise<CarebaseContext | null> {
   const { userId } = await auth();
   if (!userId) return null;
 
@@ -29,18 +37,21 @@ export async function getCarebaseContext(): Promise<CarebaseContext | null> {
       status: "ACTIVE",
       hospital: { status: "ACTIVE" },
     };
-  const membership =
-    (selectedHospitalId
-      ? await db.hospitalMember.findFirst({
-          where: { ...where, hospitalId: selectedHospitalId },
-          include: { hospital: true, role: true },
-        })
-      : null) ??
-    (await db.hospitalMember.findFirst({
-      where,
-      include: { hospital: true, role: true },
-      orderBy: { createdAt: "asc" },
-    }));
+  // Prefer the cookie-selected hospital; fall back to the oldest membership.
+  // Sequential (not parallel) so only one pool connection is held at a time.
+  // Wrapped in React cache() above, so concurrent callers in the same render
+  // share one execution instead of each grabbing pool connections.
+  let membership = selectedHospitalId
+    ? await db.hospitalMember.findFirst({
+        where: { ...where, hospitalId: selectedHospitalId },
+        include: { hospital: true, role: true },
+      })
+    : null;
+  membership ??= await db.hospitalMember.findFirst({
+    where,
+    include: { hospital: true, role: true },
+    orderBy: { createdAt: "asc" },
+  });
 
   if (!membership) return null;
 
@@ -69,7 +80,7 @@ export async function getCarebaseContext(): Promise<CarebaseContext | null> {
     departments,
     activeDepartment,
   };
-}
+});
 
 export async function requireCarebaseContext() {
   const context = await getCarebaseContext();

@@ -24,6 +24,8 @@ type InvitationEmailArgs = {
 export async function sendStaffInvitationEmail(args: InvitationEmailArgs): Promise<{
   sent: boolean;
   error?: string;
+  /** True when Resend rejected the send because the `from` domain can't email this recipient (test-mode sender). Callers can fall back to Clerk delivery. */
+  isDomainError?: boolean;
 }> {
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.RESEND_FROM_EMAIL;
@@ -80,7 +82,11 @@ export async function sendStaffInvitationEmail(args: InvitationEmailArgs): Promi
       const hint = /resend\.dev|verify a domain|testing emails/i.test(raw)
         ? " Resend's onboarding@resend.dev address can only email your own Resend account address. Verify your own domain in Resend (Domains → Add Domain), set RESEND_FROM_EMAIL to it in Vercel, redeploy, and retry."
         : "";
-      return { sent: false, error: raw + hint };
+      return {
+        sent: false,
+        error: raw + hint,
+        isDomainError: /resend\.dev|verify a domain|testing emails/i.test(raw),
+      };
     }
     return { sent: true };
   } catch (error) {

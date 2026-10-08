@@ -11,6 +11,7 @@ import {
   recordCarebaseAudit,
 } from "@/lib/carebase/audit";
 import { sendStaffInvitationEmail } from "@/lib/carebase/invitation-email";
+import { tryClerkFallbackInvite } from "@/lib/carebase/invite-delivery";
 import { requireCarebasePermission } from "@/lib/carebase/context";
 import {
   mapStaffImportFile,
@@ -209,8 +210,9 @@ export async function confirmStaffImport(
         ? importContext.departments.find((item) => item.id === row.departmentId)?.name ?? null
         : null;
 
-      // Resend is the sender — send first. If Resend fails, the row fails
-      // loudly so the owner knows the email never went out.
+      // Resend is the sender — send first. On a Resend test-mode/domain error
+      // (shared onboarding@resend.dev sender), fall back to Clerk email — or
+      // keep the row with a manual link — instead of failing the row loudly.
       const emailResult = await sendStaffInvitationEmail({
         to: row.email,
         fullName: row.fullName,
@@ -221,7 +223,31 @@ export async function confirmStaffImport(
         expiresAt: invitation.expiresAt,
       });
       if (!emailResult.sent) {
-        throw new Error(emailResult.error ?? "Invitation email could not be delivered.");
+        if (emailResult.isDomainError) {
+          const fallback = await tryClerkFallbackInvite({
+            email: row.email,
+            acceptUrl,
+            invitationId: invitation.id,
+          });
+          if (fallback.clerkInvitationId) {
+            await db.staffInvitation
+              .update({
+                where: { id: invitation.id },
+                data: { clerkInvitationId: fallback.clerkInvitationId },
+              })
+              .catch(() => undefined);
+          }
+          if (!fallback.ok) {
+            failures.push({
+              rowNumber: row.rowNumber,
+              email: row.email,
+              message:
+                "Resend test mode can't email this address — but the invite was created with a shareable link (see staff list).",
+            });
+          }
+        } else {
+          throw new Error(emailResult.error ?? "Invitation email could not be delivered.");
+        }
       }
 
       // Register with Clerk silently (notify: false) so Resend is the only sender.
